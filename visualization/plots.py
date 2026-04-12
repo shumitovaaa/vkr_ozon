@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Optional, Union
 
 import matplotlib
 
@@ -209,6 +209,9 @@ class Visualizer:
         forecast_df: pd.DataFrame,
         horizon: int = 1,
         model_label: str = "ARIMA-GARCH",
+        *,
+        extra_title_line: str | None = None,
+        save_filename: str | None = None,
     ) -> Path | None:
         """
         y_train / тест: факт y_realized, прогноз μ̂, ДИ; снизу y − μ̂.
@@ -263,11 +266,11 @@ class Visualizer:
         ax.axvspan(test_start, test_dates[-1], alpha=0.05, color="orange")
 
         ax.axhline(0, color="black", lw=0.6, alpha=0.4)
-        ax.set_title(
-            f"{model_label} | Горизонт h={horizon} | "
-            f"Прогноз лог-доходности OZON",
-            fontsize=12,
-        )
+        kind = "Кумулятивная лог-доходность (сумма следующих h дней)" if horizon > 1 else "Прогноз лог-доходности"
+        title = f"{model_label} | h={horizon} | {kind} OZON"
+        if extra_title_line:
+            title = f"{title}\n{extra_title_line}"
+        ax.set_title(title, fontsize=12)
         ax.set_ylabel("Лог-доходность")
         ax.legend(loc="upper left", fontsize=9)
         ax.grid(alpha=0.25)
@@ -284,7 +287,8 @@ class Visualizer:
         axes[1].grid(alpha=0.25)
 
         plt.tight_layout()
-        return self._save(f"fig_forecast_arima_garch_h{horizon}.png")
+        fname = save_filename or f"fig_forecast_arima_garch_h{horizon}.png"
+        return self._save(fname)
     # ─── Walk-Forward ────────────────────────────────────────────────────────
 
     def plot_wf_metrics(
@@ -318,67 +322,6 @@ class Visualizer:
         plt.suptitle(f"Walk-Forward метрики: горизонт h={horizon}", y=1.02)
         plt.tight_layout()
         return self._save(f"fig_wf_metrics_h{horizon}.png")
-    
-    def plot_wf_forecast(
-        self,
-        train_dates: pd.Index,
-        train_true: np.ndarray,
-        test_dates: pd.Index,
-        test_true: np.ndarray,
-        test_pred: np.ndarray,
-        model_name: str,
-        horizon: int,
-    ) -> Path:
-        """
-        Обучение + тест: факт, прогноз, линия старта теста, остатки снизу.
-
-        Стиль согласован с plot_arima_garch_forecast (цвета, подписи).
-        """
-        fig, axes = plt.subplots(2, 1, figsize=(14, 8),
-                                gridspec_kw={"height_ratios": [3, 1]})
-
-        # ─── Верхний график: обучение + тест + прогноз ──────────────────────────
-        ax = axes[0]
-
-        # Обучающая выборка (сплошная синяя)
-        ax.plot(train_dates, train_true, lw=1.0, color="#1f77b4",
-            label="Обучающая выборка", zorder=2)
-
-        # Тестовая выборка (сплошная оранжевая)
-        ax.plot(test_dates, test_true, lw=1.2, color="#ff7f0e",
-            label="Факт (тест)", zorder=3)
-
-        # Прогноз (пунктирная красная)
-        ax.plot(test_dates, test_pred, lw=1.2, color="#d62728", linestyle="--",
-            label=f"Прогноз {model_name}", zorder=4)
-
-        # Вертикальная линия разделения
-        ax.axvline(test_dates[0], color="black", lw=1.5, linestyle=":",
-               label="Начало теста", zorder=5)
-
-        # Небольшая заливка тестовой области (опционально)
-        ax.axvspan(test_dates[0], test_dates[-1], alpha=0.05, color="orange")
-
-        ax.axhline(0, color="black", lw=0.6, alpha=0.4)
-        ax.set_title(f"{model_name} | Горизонт h={horizon} | "
-                 f"Прогноз лог-доходности OZON", fontsize=12)
-        ax.set_ylabel("Лог-доходность")
-        ax.legend(loc="upper left", fontsize=9)
-        ax.grid(alpha=0.25)
-
-        # ─── Нижний график: остатки (только на тесте) ───────────────────────────
-        residuals = test_true - test_pred
-        axes[1].bar(test_dates, residuals,
-                color=["#d62728" if r < 0 else "#2ca02c" for r in residuals],
-                width=1.0, alpha=0.7)
-        axes[1].axhline(0, color="black", lw=0.8)
-        axes[1].set_title("Остатки (факт − прогноз) на тестовой выборке")
-        axes[1].set_ylabel("Остаток")
-        axes[1].grid(alpha=0.25)
-
-        plt.tight_layout()
-        fname = f"fig_forecast_{model_name.lower()}_h{horizon}.png"
-        return self._save(fname)
 
     def plot_wf_best_forecast(
         self,
@@ -466,81 +409,3 @@ class Visualizer:
 
         plt.tight_layout()
         return self._save(f"fig_{file_slug}_h{horizon}_residuals.png")
-
-    # ─── Остатки ────────────────────────────────────────────────────────────
-
-    def plot_residuals(
-        self, preds_df: pd.DataFrame, model_name: str
-    ) -> Optional[Path]:
-        pred_col = f"pred_{model_name}"
-        if pred_col not in preds_df.columns:
-            logger.warning(f"[PLOT] Колонка {pred_col} не найдена")
-            return None
-
-        residuals = (preds_df["y_true_reg"] - preds_df[pred_col]).dropna()
-        if len(residuals) < 10:
-            return None
-
-        fig, axes = plt.subplots(1, 3, figsize=(16, 4))
-
-        # 1. Остатки во времени
-        axes[0].plot(preds_df.index, residuals, lw=0.7, color="steelblue")
-        axes[0].axhline(0, color="red", lw=0.8)
-        axes[0].set_title(f"Остатки {model_name} во времени")
-        axes[0].set_ylabel("Ошибка")
-        axes[0].grid(alpha=0.3)
-
-        # 2. Q-Q plot
-        stats.probplot(residuals.values, plot=axes[1])
-        axes[1].set_title(f"Q-Q plot: {model_name}")
-        axes[1].grid(alpha=0.3)
-
-        # 3. ACF остатков
-        plot_acf(residuals.values, lags=20, ax=axes[2],
-                 title=f"ACF остатков: {model_name}")
-        axes[2].grid(alpha=0.3)
-
-        plt.tight_layout()
-        return self._save(f"fig_residuals_{model_name.lower()}.png")
-
-    # ─── Feature importance ──────────────────────────────────────────────────
-
-    def plot_feature_importance(
-        self,
-        model: Any,
-        feature_names: List[str],
-        model_name: str,
-        top_n: int = 20,
-    ) -> Optional[Path]:
-        try:
-            imp = model.feature_importances_
-        except AttributeError:
-            try:
-                imp = np.abs(model.coef_)
-            except AttributeError:
-                logger.warning(f"[PLOT] {model_name}: нет feature_importances_")
-                return None
-
-        indices = np.argsort(imp)[-top_n:]
-        fig, ax = plt.subplots(figsize=(9, max(4, top_n * 0.3)))
-        ax.barh([feature_names[i] for i in indices],
-                imp[indices], color="steelblue")
-        ax.set_title(f"Важность признаков: {model_name} (топ {top_n})")
-        ax.set_xlabel("Importance")
-        ax.grid(axis="x", alpha=0.3)
-        plt.tight_layout()
-        return self._save(f"fig_importance_{model_name.lower()}.png")
-
-    # ─── Все графики разом ───────────────────────────────────────────────────
-
-    def save_all(self, df: pd.DataFrame) -> List[Path]:
-        saved = []
-        for fn in [self.plot_price_volume, self.plot_returns,
-                   self.plot_seasonality, self.plot_correlation]:
-            try:
-                p = fn(df)
-                if p:
-                    saved.append(p)
-            except Exception as exc:
-                logger.warning(f"[PLOT] {fn.__name__} failed: {exc}")
-        return saved

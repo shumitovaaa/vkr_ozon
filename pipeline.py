@@ -1,7 +1,12 @@
 """
 Единая сборка пайплайна: EDA, baseline ARIMA–GARCH, walk-forward ML (Ridge, RF, LGB), стекинг.
 
+Модели по смыслу: (1) эконометрика — ARIMA+GARCH по ряду доходностей; (2) ML-регрессия и
+(3) ML-классификация направления — Ridge/RF/LGB в walk-forward; (4) опционально стекинг.
+Все настройки — в ``config.CFG``.
+
 Сравнение регрессоров — по единому walk-forward; лучшая модель на горизонт и в среднем по h.
+Для ARIMA график строится по горизонту с лучшей метрикой среди ``ARIMA_FORECAST_HORIZONS``.
 
 Точка входа: run_experiment().
 """
@@ -12,7 +17,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -32,12 +37,73 @@ from evaluation.wf_selection import (
     overall_best_across_horizons,
     select_best_model,
 )
+from features.returns import compute_log_returns
 from models.walk_forward import (
+    COL_CI_LOWER,
+    COL_CI_UPPER,
+    COL_MU_FORECAST,
+    COL_Y_REALIZED,
     rolling_forecast_hybrid_arima_garch,
     walk_forward_train_eval,
 )
 from models.stacking import fit_stacking
 from visualization.plots import Visualizer
+
+
+def _arima_subframe_for_horizon(
+    forecast_df: pd.DataFrame, h: int
+) -> pd.DataFrame:
+    """Вырезка прогноза ARIMA для горизонта h с колонками как у h=1."""
+    h = int(h)
+    if h == 1:
+        return forecast_df[
+            [COL_Y_REALIZED, COL_MU_FORECAST, COL_CI_LOWER, COL_CI_UPPER]
+        ].copy()
+    cy, cm, cl, ch = (
+        f"y_realized_h{h}",
+        f"mu_forecast_h{h}",
+        f"ci_lower_h{h}",
+        f"ci_upper_h{h}",
+    )
+    if cy not in forecast_df.columns:
+        return pd.DataFrame()
+    return forecast_df[[cy, cm, cl, ch]].rename(
+        columns={
+            cy: COL_Y_REALIZED,
+            cm: COL_MU_FORECAST,
+            cl: COL_CI_LOWER,
+            ch: COL_CI_UPPER,
+        }
+    )
+
+
+def _arima_horizon_metrics_df(
+    forecast_df: pd.DataFrame, fh: Sequence[int]
+) -> pd.DataFrame:
+    """Сводка регрессионных метрик по тестовому окну для каждого h."""
+    rows: list[dict[str, Any]] = []
+    for h in fh:
+        sub = _arima_subframe_for_horizon(forecast_df, int(h))
+        sub = sub.dropna(subset=[COL_Y_REALIZED, COL_MU_FORECAST], how="any")
+        if len(sub) < 2:
+            continue
+        r = regression_metrics(
+            sub[COL_Y_REALIZED].values,
+            sub[COL_MU_FORECAST].values,
+            f"ARIMA_h{h}",
+        )
+        rows.append(
+            {
+                "horizon": int(h),
+                "model": f"ARIMA_h{h}",
+                "MAE": r.get("MAE"),
+                "RMSE": r.get("RMSE"),
+                "MAPE": r.get("MAPE"),
+                "R2": r.get("R2"),
+            }
+        )
+    return pd.DataFrame(rows)
+
 
 logger = logging.getLogger(__name__)
 
@@ -75,27 +141,49 @@ def run_hybrid_arima_garch(
     df: pd.DataFrame, cfg: Dict[str, Any], out: Path
 ) -> pd.DataFrame:
     """
-    Rolling baseline: μ̂ из ARIMA(p,d,q), σ̂² по ε̂ из GARCH; график h=1.
+    Rolling baseline: для h=1 — гибрид ARIMA+GARCH; для h∈ARIMA_FORECAST_HORIZONS, h>1 —
+    кумулятивный прогноз ARIMA (как ``reg_h``).
+
+    По метрике ``ARIMA_BEST_HORIZON_METRIC`` (или ``BEST_MODEL_METRIC``) выбирается
+    лучший h среди заданных; сохраняется один график ``fig_forecast_arima_garch_best.png``
+    и JSON ``arima_best_horizon.json`` с метриками по всем h.
 
     Returns
     -------
-    DataFrame с колонками y_realized, mu_forecast, ci_lower, ci_upper.
+    DataFrame: колонки h=1 — ``y_realized``, ``mu_forecast``, …; для h>1 —
+    ``y_realized_h{h}``, ``mu_forecast_h{h}``, ``ci_lower_h{h}``, ``ci_upper_h{h}``.
     """
     if "log_ret" not in df.columns:
         df = df.copy()
-        df["log_ret"] = np.log(df["CLOSE"] / df["CLOSE"].shift(1))
+        df["log_ret"] = compute_log_returns(df["CLOSE"])
 
     series = df["log_ret"].dropna()
-    test_frac = cfg.get("TEST_FRACTION", 0.2)
-    test_size = int(len(series) * test_frac)
+    n_sr = len(series)
+    if n_sr < 2:
+        logger.warning(
+            "[ARIMA-GARCH] слишком мало точек лог-доходности (%s) — пропуск rolling",
+            n_sr,
+        )
+        return pd.DataFrame()
+
+    min_train = int(cfg.get("ARIMA_GARCH_MIN_TRAIN", 100))
+    test_frac = float(cfg.get("TEST_FRACTION", 0.2))
+    test_size = max(1, int(n_sr * test_frac))
     if cfg.get("ARIMA_MAX_TEST_DAYS"):
         test_size = min(test_size, int(cfg["ARIMA_MAX_TEST_DAYS"]))
     test_size = max(30, test_size)
+    cap_len = max(1, n_sr - 1)
+    if n_sr > min_train:
+        test_size = min(test_size, cap_len, n_sr - min_train)
+    else:
+        test_size = min(test_size, cap_len)
+    if test_size < 1:
+        test_size = 1
     logger.info(
-        "[ARIMA-GARCH] test_size=%s из %s (%.1f%%)",
+        "[ARIMA-GARCH] test_size=%s из len(log_ret)=%s (%.1f%% теста)",
         test_size,
-        len(series),
-        100.0 * test_size / max(len(series), 1),
+        n_sr,
+        100.0 * test_size / max(n_sr, 1),
     )
 
     order_cfg = cfg.get("ARIMA_ORDER", [1, 0, 1])
@@ -103,27 +191,98 @@ def run_hybrid_arima_garch(
     if len(arima_order) < 3:
         arima_order = (1, 0, 1)
 
+    fh = list(cfg.get("ARIMA_FORECAST_HORIZONS", [1, 5, 10]))
     forecast_df = rolling_forecast_hybrid_arima_garch(
         y=series,
         test_size=test_size,
         arima_order=arima_order,
-        alpha=cfg.get("CI_ALPHA", 0.10),
+        alpha=float(cfg.get("CI_ALPHA", 0.10)),
         garch_p=int(cfg.get("GARCH_P", 1)),
         garch_q=int(cfg.get("GARCH_Q", 1)),
         min_train_for_hybrid=int(cfg.get("ARIMA_GARCH_MIN_TRAIN", 100)),
         use_garch_on_eps=bool(cfg.get("USE_ARIMA_GARCH", True)),
+        forecast_horizons=fh,
     )
 
-    viz = Visualizer(out)
+    metric_key = cfg.get("ARIMA_BEST_HORIZON_METRIC") or cfg.get(
+        "BEST_MODEL_METRIC", "RMSE"
+    )
+    metric_key = str(metric_key)
+    if metric_key not in ("MAE", "RMSE", "MAPE", "R2"):
+        logger.warning(
+            "[ARIMA-GARCH] метрика %s для выбора h не поддерживается, используем RMSE",
+            metric_key,
+        )
+        metric_key = "RMSE"
+    mdf = _arima_horizon_metrics_df(forecast_df, fh)
+    best_h = int(fh[0]) if fh else 1
+    best_meta: Dict[str, Any] = {}
+    if not mdf.empty and metric_key in mdf.columns:
+        _name, best_meta = select_best_model(mdf, metric=metric_key)
+        hm = re.match(r"ARIMA_h(\d+)", str(_name))
+        if hm:
+            best_h = int(hm.group(1))
+    else:
+        if mdf.empty:
+            logger.warning(
+                "[ARIMA-GARCH] не удалось посчитать метрики по горизонтам — график h=%s",
+                best_h,
+            )
+
     try:
-        viz.plot_arima_garch_forecast(
-            y_full=series,
-            forecast_df=forecast_df,
-            horizon=1,
-            model_label=cfg.get("ARIMA_PLOT_LABEL", "ARIMA-GARCH"),
+        (out / "arima_horizons_metrics.csv").write_text(
+            mdf.to_csv(index=False, encoding="utf-8"),
+            encoding="utf-8",
         )
     except Exception as exc:
-        logger.warning("[ARIMA-GARCH] plot failed: %s", exc)
+        logger.warning("[ARIMA-GARCH] сохранение arima_horizons_metrics.csv: %s", exc)
+
+    try:
+        summary = {
+            "selection_metric": metric_key,
+            "horizons_evaluated": [int(x) for x in fh],
+            "metrics_by_horizon": mdf.to_dict("records") if not mdf.empty else [],
+            "best_horizon": best_h,
+            "best_metric_value": best_meta.get("value"),
+        }
+        (out / "arima_best_horizon.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("[ARIMA-GARCH] сохранение arima_best_horizon.json: %s", exc)
+
+    viz = Visualizer(out)
+    label = cfg.get("ARIMA_PLOT_LABEL", "ARIMA-GARCH")
+    sub_best = _arima_subframe_for_horizon(forecast_df, best_h)
+    sub_best = sub_best.dropna(subset=[COL_Y_REALIZED, COL_MU_FORECAST], how="any")
+    extra_line = (
+        f"Лучший горизонт по {metric_key} среди {{{', '.join(str(x) for x in fh)}}} "
+        f"(значение={best_meta.get('value')})"
+        if best_meta
+        else f"Горизонт h={best_h} (метрики по горизонтам недоступны)"
+    )
+    try:
+        if not sub_best.empty:
+            viz.plot_arima_garch_forecast(
+                y_full=series,
+                forecast_df=sub_best,
+                horizon=int(best_h),
+                model_label=label,
+                extra_title_line=extra_line,
+                save_filename="fig_forecast_arima_garch_best.png",
+            )
+        else:
+            logger.warning("[ARIMA-GARCH] пустая вырезка для лучшего h=%s", best_h)
+    except Exception as exc:
+        logger.warning("[ARIMA-GARCH] plot best h=%s failed: %s", best_h, exc)
+
+    logger.info(
+        "[ARIMA-GARCH] Лучший горизонт по %s: h=%s (%s)",
+        metric_key,
+        best_h,
+        best_meta,
+    )
 
     return forecast_df
 
@@ -197,7 +356,10 @@ def _holdout_split(
     X: pd.DataFrame, y_reg: pd.Series, test_frac: float
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     """Последняя доля ряда — тест для стекинга."""
-    split_point = int(len(X) * (1 - test_frac))
+    n = len(X)
+    if n < 2:
+        return X.iloc[:0], X, y_reg.iloc[:0], y_reg
+    split_point = max(1, min(int(n * (1 - test_frac)), n - 1))
     return (
         X.iloc[:split_point],
         X.iloc[split_point:],
@@ -249,10 +411,14 @@ def _run_horizon_ml(
     results["buy_hold"][h] = buy_hold_metrics(y_reg.values)
 
     if not df_clf.empty and "Accuracy" in df_clf.columns:
-        best_row = df_clf.sort_values("Accuracy", ascending=False).iloc[0]
-        best_name = best_row["model"]
+        agg_clf = mean_metrics_by_model(df_clf)
+        best_name, _ = (
+            select_best_model(agg_clf, metric="Accuracy")
+            if not agg_clf.empty
+            else ("", {})
+        )
         pred_col = f"pred_{best_name}"
-        if pred_col in preds_df.columns:
+        if best_name and pred_col in preds_df.columns:
             results["trading"][h] = trading_metrics(
                 y_true_ret=preds_df["y_true_reg"].values,
                 y_pred_direction=np.where(
@@ -405,11 +571,12 @@ def run_experiment(
     df = validate_data(df, cfg)
 
     df = df.copy()
-    df["log_ret"] = np.log(df["CLOSE"] / df["CLOSE"].shift(1))
+    df["log_ret"] = compute_log_returns(df["CLOSE"])
 
     df_feat = compute_indicators(df, cfg)
     df_feat = attach_news_sentiment_features(df_feat, cfg)
     run_eda(df_feat, out, cfg)
+
     arima_garch_df = run_hybrid_arima_garch(df_feat, cfg, out)
     ml_results = run_ml(df_feat, cfg, out)
 

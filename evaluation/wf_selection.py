@@ -33,12 +33,13 @@ def select_best_model(
     """
     Выбрать лучшую модель по средней метрике.
 
-    Для R2 — максимизация, для MAE, RMSE, MAPE — минимизация.
+    Для R2, Accuracy, AUC, F1 — максимизация; для MAE, RMSE, MAPE — минимизация.
     """
     if agg.empty or "model" not in agg.columns or metric not in agg.columns:
         return "", {}
 
-    minimize = metric != "R2"
+    _maximize = frozenset({"R2", "Accuracy", "AUC", "F1"})
+    minimize = metric not in _maximize
     series = agg.set_index("model")[metric]
     if minimize:
         best_name = str(series.idxmin())

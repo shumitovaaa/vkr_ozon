@@ -1,7 +1,3 @@
-"""
-Фильтры по датам и ключевым словам; календарь торговых дней для новостей.
-"""
-
 from __future__ import annotations
 
 import logging

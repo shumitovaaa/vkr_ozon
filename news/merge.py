@@ -1,7 +1,3 @@
-"""
-Слияние дневных признаков тональности с рядом котировок (attach_news_sentiment_features).
-"""
-
 from __future__ import annotations
 
 import logging

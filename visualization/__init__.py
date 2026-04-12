@@ -1,5 +1,3 @@
-"""visualization — графики EDA, walk-forward и отчёты."""
-
+"""visualization — графики пайплайна."""
 from .plots import Visualizer
-
 __all__ = ["Visualizer"]

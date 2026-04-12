@@ -1,7 +1,7 @@
 """
 Загрузка постов стены VK (wall.get): дата, заголовок, текст, ссылка.
 
-После сборки строк применяется фильтр релевантности Ozon (см. ``maybe_filter_ozon_after_parse``).
+После сборки строк применяется фильтр релевантности Ozon (``maybe_filter_ozon_after_parse``).
 """
 
 from __future__ import annotations
@@ -317,6 +317,10 @@ def fetch_vk_news(cfg: Dict[str, Any]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values("date").reset_index(drop=True)
-    logger.info("[VK] Записей после парсинга и ключевых слов VK: %s (просмотрено постов: %s)", len(df), scanned)
+    logger.info(
+        "[VK] Записей после парсинга и ключевых слов VK: %s (просмотрено постов: %s)",
+        len(df),
+        scanned,
+    )
     df = maybe_filter_ozon_after_parse(df, cfg, log_tag="[VK]")
     return df

@@ -1,7 +1,3 @@
-"""
-Очистка текста новостей и склейка заголовка с телом (clean_news_text, combine_headline_body).
-"""
-
 from __future__ import annotations
 
 import html

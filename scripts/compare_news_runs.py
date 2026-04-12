@@ -1,11 +1,7 @@
-"""
-Сравнение двух прогонов pipeline (с/без новостей) по сохранённым метрикам.
-"""
-
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+import sys
 
 import pandas as pd
 

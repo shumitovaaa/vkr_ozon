@@ -1,5 +1,3 @@
-"""evaluation — метрики качества и выбор моделей walk-forward."""
-
 from .metrics import (
     Evaluator,
     regression_metrics,

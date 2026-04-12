@@ -87,6 +87,9 @@ def load_data(filepath: Union[str, Path]) -> pd.DataFrame:
 
     df.dropna(subset=["OPEN", "HIGH", "LOW", "CLOSE"], inplace=True)
 
+    if len(df) == 0:
+        raise ValueError("После удаления пропусков по OHLC не осталось ни одной строки")
+
     logger.info(
         "Загружено: %s строк, %s — %s",
         len(df),

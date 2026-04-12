@@ -22,7 +22,7 @@ Walk-forward валидация и rolling baseline ARIMA–GARCH на лог-д
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -58,34 +58,68 @@ COL_CI_LOWER = "ci_lower"
 COL_CI_UPPER = "ci_upper"
 
 
-def _build_models(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Создать свежие экземпляры моделей под один фолд."""
+def _lgb_train_kwargs(cfg: Dict[str, Any], clf: bool) -> Dict[str, Any]:
+    """Параметры LGB для регрессии или классификации (для clf — ключи LGBCLF_* из CFG)."""
     seed = cfg.get("SEED", cfg.get("RANDOM_STATE", 42))
-    lgb_params = {
-        "n_estimators": cfg.get("LGB_N_EST", 300),
-        "learning_rate": cfg.get("LGB_LR", 0.05),
-        "num_leaves": cfg.get("LGB_LEAVES", 31),
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
+    if clf:
+
+        def pick(pk: str, fb: str, default: Any) -> Any:
+            v = cfg.get(pk)
+            return cfg.get(fb, default) if v is None else v
+
+        return {
+            "n_estimators": int(pick("LGBCLF_N_EST", "LGB_N_EST", 300)),
+            "learning_rate": float(pick("LGBCLF_LR", "LGB_LR", 0.05)),
+            "num_leaves": int(pick("LGBCLF_LEAVES", "LGB_LEAVES", 31)),
+            "max_depth": int(pick("LGBCLF_MAX_DEPTH", "LGB_MAX_DEPTH", -1)),
+            "min_child_samples": int(
+                pick("LGBCLF_MIN_CHILD_SAMPLES", "LGB_MIN_CHILD_SAMPLES", 20)
+            ),
+            "subsample": float(pick("LGBCLF_SUBSAMPLE", "LGB_SUBSAMPLE", 0.8)),
+            "colsample_bytree": float(
+                pick("LGBCLF_COLSAMPLE_BYTREE", "LGB_COLSAMPLE_BYTREE", 0.8)
+            ),
+            "random_state": seed,
+            "verbose": -1,
+            "n_jobs": -1,
+        }
+    return {
+        "n_estimators": int(cfg.get("LGB_N_EST", 300)),
+        "learning_rate": float(cfg.get("LGB_LR", 0.05)),
+        "num_leaves": int(cfg.get("LGB_LEAVES", 31)),
+        "max_depth": int(cfg.get("LGB_MAX_DEPTH", -1)),
+        "min_child_samples": int(cfg.get("LGB_MIN_CHILD_SAMPLES", 20)),
+        "subsample": float(cfg.get("LGB_SUBSAMPLE", 0.8)),
+        "colsample_bytree": float(cfg.get("LGB_COLSAMPLE_BYTREE", 0.8)),
         "random_state": seed,
         "verbose": -1,
+        "n_jobs": -1,
     }
+
+
+def _build_models(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Создать свежие экземпляры моделей под один фолд (параметры из ``cfg``)."""
+    seed = cfg.get("SEED", cfg.get("RANDOM_STATE", 42))
+    lgb_reg = _lgb_train_kwargs(cfg, clf=False)
+    lgb_clf = _lgb_train_kwargs(cfg, clf=True)
     return {
         "Ridge": Ridge(alpha=cfg.get("RIDGE_ALPHA", 1.0)),
         "RFreg": RandomForestRegressor(
-            n_estimators=cfg.get("RF_N_EST", 200),
-            max_depth=cfg.get("RF_MAX_DEPTH", 8),
+            n_estimators=int(cfg.get("RF_N_EST_REG", 200)),
+            max_depth=int(cfg.get("RF_MAX_DEPTH_REG", 6)),
+            min_samples_leaf=int(cfg.get("RF_MIN_SAMPLES_LEAF_REG", 5)),
             random_state=seed,
             n_jobs=-1,
         ),
-        "LGBreg": LGBMRegressor(**lgb_params),
+        "LGBreg": LGBMRegressor(**lgb_reg),
         "RFclf": RandomForestClassifier(
-            n_estimators=cfg.get("RF_N_EST", 200),
-            max_depth=cfg.get("RF_MAX_DEPTH", 8),
+            n_estimators=int(cfg.get("RF_N_EST_CLF", 200)),
+            max_depth=int(cfg.get("RF_MAX_DEPTH_CLF", 5)),
+            min_samples_leaf=int(cfg.get("RF_MIN_SAMPLES_LEAF_CLF", 5)),
             random_state=seed,
             n_jobs=-1,
         ),
-        "LGBclf": LGBMClassifier(**lgb_params),
+        "LGBclf": LGBMClassifier(**lgb_clf),
     }
 
 
@@ -94,13 +128,14 @@ def _purged_splits(
     n_splits: int = 5,
     embargo: int = EMBARGO_DAYS,
     train_window: int = TRAIN_WINDOW,
+    test_fraction: float = 0.2,
 ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
     """
     Скользящие train/test с embargo между концом train и началом test.
 
-    Доля теста суммарно ~20% выборки, делится на n_splits фолдов.
+    Суммарная доля теста — ``test_fraction`` (как ``TEST_FRACTION`` в CFG), делится на ``n_splits`` фолдов.
     """
-    total_test = int(n * 0.20)
+    total_test = max(1, int(n * float(test_fraction)))
     test_size = max(1, total_test // n_splits)
 
     for i in range(n_splits):
@@ -206,6 +241,7 @@ def walk_forward_train_eval(
     models = _build_models(cfg)
     n = len(X)
     n_splits = cfg.get("WF_SPLITS", 5)
+    test_fraction = float(cfg.get("TEST_FRACTION", 0.2))
 
     res_reg: List[Dict[str, Any]] = []
     res_clf: List[Dict[str, Any]] = []
@@ -217,6 +253,7 @@ def walk_forward_train_eval(
             n_splits,
             embargo=int(cfg.get("EMBARGO_DAYS", EMBARGO_DAYS)),
             train_window=int(cfg.get("TRAIN_WINDOW", TRAIN_WINDOW)),
+            test_fraction=test_fraction,
         )
     ):
         X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
@@ -265,6 +302,15 @@ def walk_forward_train_eval(
             len(tr_idx),
             len(te_idx),
         )
+
+    if not all_preds:
+        logger.warning(
+            "[WF] Нет ни одного валидного фолда (n=%s, WF_SPLITS=%s, "
+            "EMBARGO/TRAIN_WINDOW/TEST_FRACTION — проверьте CFG)",
+            n,
+            n_splits,
+        )
+        return res_reg, res_clf, pd.DataFrame()
 
     preds_df = pd.concat(all_preds).sort_index()
 
@@ -352,9 +398,13 @@ def rolling_forecast_hybrid_arima_garch(
     garch_q: int = 1,
     min_train_for_hybrid: int = 100,
     use_garch_on_eps: bool = True,
+    forecast_horizons: Sequence[int] = (1,),
 ) -> pd.DataFrame:
     """
-    Expanding-window прогноз на 1 шаг: гибрид ARIMA (μ) + GARCH(σ²|ε̂) либо только ARIMA.
+    Expanding-window прогнозы: для h=1 — гибрид ARIMA (μ) + GARCH(σ²|ε̂); для h>1 —
+    кумулятивная сумма h пошаговых прогнозов ARIMA (как ``reg_h`` в ``FeatureBuilder``).
+
+    Факт для h>1: сумма ``y`` на следующих h торговых днях (при нехватке хвоста — NaN).
 
     Parameters
     ----------
@@ -363,19 +413,31 @@ def rolling_forecast_hybrid_arima_garch(
     arima_order
         (p, d, q) для уравнения среднего ARIMA(p,d,q).
     alpha
-        Уровень значимости для ДИ (совместный с CI_ALPHA в CFG).
+        Уровень значимости для ДИ (совместный с ``CI_ALPHA`` в ``CFG``).
     use_garch_on_eps
-        Если False — только ARIMA для μ̂ и доверительного интервала.
+        Если False — только ARIMA для μ̂ и доверительного интервала (только h=1).
+    forecast_horizons
+        Набор h (например 1, 5, 10). Должен содержать 1, если нужен гибрид GARCH.
     """
     y = y.dropna()
     n = len(y)
     train_end = n - test_size
+
+    horizons = tuple(sorted({int(h) for h in forecast_horizons if int(h) >= 1}))
+    if not horizons:
+        horizons = (1,)
 
     mu_forecasts: List[float] = []
     y_realized: List[float] = []
     ci_lower: List[float] = []
     ci_upper: List[float] = []
     idx_test: List[Any] = []
+
+    extra: Dict[str, List[float]] = {}
+    for h in horizons:
+        if h != 1:
+            for suffix in ("y_realized", "mu_forecast", "ci_lower", "ci_upper"):
+                extra[f"{suffix}_h{h}"] = []
 
     if use_garch_on_eps and not HAS_ARCH:
         logger.warning(
@@ -389,45 +451,87 @@ def rolling_forecast_hybrid_arima_garch(
         hi = 0.0
         hybrid_ok = False
 
-        if use_garch_on_eps and HAS_ARCH and len(y_history) >= min_train_for_hybrid:
-            try:
-                mu_hat, lo, hi = _one_step_hybrid_arima_mean_garch_variance_ci(
-                    y_history,
-                    arima_order=arima_order,
-                    garch_p=garch_p,
-                    garch_q=garch_q,
-                    alpha=alpha,
-                    min_eps_for_garch=max(40, garch_p + garch_q + 15),
-                )
-                hybrid_ok = True
-            except Exception as exc:
-                logger.warning(
-                    "[ARIMA-GARCH] step=%s гибрид: %s — fallback только ARIMA",
-                    step,
-                    exc,
-                )
+        if 1 in horizons:
+            if use_garch_on_eps and HAS_ARCH and len(y_history) >= min_train_for_hybrid:
+                try:
+                    mu_hat, lo, hi = _one_step_hybrid_arima_mean_garch_variance_ci(
+                        y_history,
+                        arima_order=arima_order,
+                        garch_p=garch_p,
+                        garch_q=garch_q,
+                        alpha=alpha,
+                        min_eps_for_garch=max(40, garch_p + garch_q + 15),
+                    )
+                    hybrid_ok = True
+                except Exception as exc:
+                    logger.warning(
+                        "[ARIMA-GARCH] step=%s гибрид: %s — fallback только ARIMA",
+                        step,
+                        exc,
+                    )
 
-        if not hybrid_ok:
-            try:
-                mu_hat, lo, hi = _one_step_arima_mean_and_gaussian_ci(
-                    y_history, arima_order, alpha
-                )
-            except Exception as exc:
-                logger.warning("[ARIMA] step=%s: %s", step, exc)
-                mu_hat, lo, hi = 0.0, 0.0, 0.0
+            if not hybrid_ok:
+                try:
+                    mu_hat, lo, hi = _one_step_arima_mean_and_gaussian_ci(
+                        y_history, arima_order, alpha
+                    )
+                except Exception as exc:
+                    logger.warning("[ARIMA] step=%s: %s", step, exc)
+                    mu_hat, lo, hi = 0.0, 0.0, 0.0
 
-        mu_forecasts.append(mu_hat)
-        ci_lower.append(lo)
-        ci_upper.append(hi)
-        y_realized.append(float(y.iloc[train_end + step]))
+            mu_forecasts.append(mu_hat)
+            ci_lower.append(lo)
+            ci_upper.append(hi)
+            y_realized.append(float(y.iloc[train_end + step]))
+        else:
+            mu_forecasts.append(float("nan"))
+            ci_lower.append(float("nan"))
+            ci_upper.append(float("nan"))
+            y_realized.append(float("nan"))
+
         idx_test.append(y.index[train_end + step])
 
-    return pd.DataFrame(
-        {
-            COL_Y_REALIZED: y_realized,
-            COL_MU_FORECAST: mu_forecasts,
-            COL_CI_LOWER: ci_lower,
-            COL_CI_UPPER: ci_upper,
-        },
-        index=pd.Index(idx_test, name="date"),
-    )
+        extra_hs = [h for h in horizons if h > 1]
+        if extra_hs:
+            max_h = max(extra_hs)
+            start = train_end + step
+            try:
+                arima_res = ARIMA(y_history, order=arima_order).fit()
+                fc = arima_res.get_forecast(steps=max_h)
+                pm = np.asarray(fc.predicted_mean, dtype=np.float64).ravel()
+                ci_df = fc.conf_int(alpha=alpha)
+                lo_a = np.asarray(ci_df.iloc[:, 0], dtype=np.float64).ravel()
+                hi_a = np.asarray(ci_df.iloc[:, 1], dtype=np.float64).ravel()
+                for h in extra_hs:
+                    end = start + h
+                    y_cum = (
+                        float(y.iloc[start:end].sum())
+                        if end <= n
+                        else float("nan")
+                    )
+                    extra[f"y_realized_h{h}"].append(y_cum)
+                    extra[f"mu_forecast_h{h}"].append(float(pm[:h].sum()))
+                    extra[f"ci_lower_h{h}"].append(float(lo_a[:h].sum()))
+                    extra[f"ci_upper_h{h}"].append(float(hi_a[:h].sum()))
+            except Exception as exc:
+                logger.warning("[ARIMA] multi-h step=%s: %s", step, exc)
+                for h in extra_hs:
+                    end = start + h
+                    y_cum = (
+                        float(y.iloc[start:end].sum())
+                        if end <= n
+                        else float("nan")
+                    )
+                    extra[f"y_realized_h{h}"].append(y_cum)
+                    extra[f"mu_forecast_h{h}"].append(float("nan"))
+                    extra[f"ci_lower_h{h}"].append(float("nan"))
+                    extra[f"ci_upper_h{h}"].append(float("nan"))
+
+    out_dict: Dict[str, Any] = {
+        COL_Y_REALIZED: y_realized,
+        COL_MU_FORECAST: mu_forecasts,
+        COL_CI_LOWER: ci_lower,
+        COL_CI_UPPER: ci_upper,
+    }
+    out_dict.update({k: v for k, v in extra.items()})
+    return pd.DataFrame(out_dict, index=pd.Index(idx_test, name="date"))

@@ -50,17 +50,23 @@ def fit_stacking(
     split = int(len(Xs_tr) * 0.8)
 
     rf = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=8,
+        n_estimators=int(cfg.get("RF_N_EST_REG", 200)),
+        max_depth=int(cfg.get("RF_MAX_DEPTH_REG", 6)),
+        min_samples_leaf=int(cfg.get("RF_MIN_SAMPLES_LEAF_REG", 5)),
         random_state=seed,
         n_jobs=-1,
     )
     lgb = LGBMRegressor(
-        n_estimators=300,
-        learning_rate=0.05,
-        num_leaves=31,
+        n_estimators=int(cfg.get("LGB_N_EST", 300)),
+        learning_rate=float(cfg.get("LGB_LR", 0.05)),
+        num_leaves=int(cfg.get("LGB_LEAVES", 31)),
+        max_depth=int(cfg.get("LGB_MAX_DEPTH", -1)),
+        min_child_samples=int(cfg.get("LGB_MIN_CHILD_SAMPLES", 20)),
+        subsample=float(cfg.get("LGB_SUBSAMPLE", 0.8)),
+        colsample_bytree=float(cfg.get("LGB_COLSAMPLE_BYTREE", 0.8)),
         verbose=-1,
         random_state=seed,
+        n_jobs=-1,
     )
     rf.fit(Xs_tr.iloc[:split], y_train[:split])
     lgb.fit(Xs_tr.iloc[:split], y_train[:split])
@@ -71,7 +77,7 @@ def fit_stacking(
             lgb.predict(Xs_tr.iloc[split:]),
         ]
     )
-    meta_ridge = Ridge(alpha=cfg.get("RIDGE_ALPHA", 1.0))
+    meta_ridge = Ridge(alpha=float(cfg.get("RIDGE_ALPHA", 1.0)))
     meta_ridge.fit(meta_tr, y_train[split:])
 
     meta_te = np.column_stack([rf.predict(Xs_te), lgb.predict(Xs_te)])

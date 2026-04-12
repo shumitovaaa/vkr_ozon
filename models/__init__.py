@@ -1,6 +1,5 @@
-"""ML-модели, масштабирование и вспомогательный поиск гиперпараметров."""
+"""ML-модели, масштабирование, walk-forward."""
 
-from .optuna_search import optuna_lgb_search
 from .scaling import robust_scale_train_test
 from .stacking import fit_stacking
 from .walk_forward import (
@@ -20,6 +19,5 @@ __all__ = [
     "COL_CI_LOWER",
     "COL_CI_UPPER",
     "fit_stacking",
-    "optuna_lgb_search",
     "robust_scale_train_test",
 ]

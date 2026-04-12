@@ -1,7 +1,3 @@
-"""
-Агрегация тональности новостей по торговым дням (daily_sentiment_features).
-"""
-
 from __future__ import annotations
 
 import logging

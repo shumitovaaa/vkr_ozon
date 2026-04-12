@@ -1,4 +1,4 @@
-"""data — загрузка CSV котировок и валидация временного ряда."""
+"""data — загрузка и предобработка котировок."""
 from .loader import load_data, load_trading_dates
 from .validator import validate_data
 
