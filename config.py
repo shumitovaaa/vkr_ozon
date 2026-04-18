@@ -75,6 +75,8 @@ CFG: Dict[str, Any] = {
     "FILE_PATH": "OZON_combined.csv",
     "COMMISSION": 0.0005,
     "USE_NEWS_SENTIMENT": True,
+    # Доп. прогон ML без новостей + CSV сравнения with/without news
+    "RUN_NEWS_ABLATION": False,
     "NEWS_CSV_PATH": "data/news.csv",
     "NEWS_MODEL": "seara/rubert-tiny2-russian-sentiment",
     "NEWS_BATCH_SIZE": 8,

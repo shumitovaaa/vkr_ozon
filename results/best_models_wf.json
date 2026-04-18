@@ -113,6 +113,65 @@
       ]
     }
   },
+  "per_horizon_clf": {
+    "1": {
+      "model": "RFclf",
+      "metric": "Accuracy",
+      "metric_value": 0.58571,
+      "mean_metrics_by_model": [
+        {
+          "model": "LGBclf",
+          "Accuracy": 0.55716,
+          "F1": 0.47294,
+          "AUC": 0.5451900000000001
+        },
+        {
+          "model": "RFclf",
+          "Accuracy": 0.58571,
+          "F1": 0.36138,
+          "AUC": 0.48990999999999996
+        }
+      ]
+    },
+    "5": {
+      "model": "RFclf",
+      "metric": "Accuracy",
+      "metric_value": 0.47856000000000004,
+      "mean_metrics_by_model": [
+        {
+          "model": "LGBclf",
+          "Accuracy": 0.47142,
+          "F1": 0.46914999999999996,
+          "AUC": 0.594375
+        },
+        {
+          "model": "RFclf",
+          "Accuracy": 0.47856000000000004,
+          "F1": 0.51149,
+          "AUC": 0.531625
+        }
+      ]
+    },
+    "10": {
+      "model": "LGBclf",
+      "metric": "Accuracy",
+      "metric_value": 0.4643,
+      "mean_metrics_by_model": [
+        {
+          "model": "LGBclf",
+          "Accuracy": 0.4643,
+          "F1": 0.48986999999999997,
+          "AUC": 0.58355
+        },
+        {
+          "model": "RFclf",
+          "Accuracy": 0.43572,
+          "F1": 0.51416,
+          "AUC": 0.40018750000000003
+        }
+      ]
+    }
+  },
   "overall_across_horizons": {
     "model": "RFreg",
     "metric": "RMSE",
