@@ -9,7 +9,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from config import CFG
+from config import CFG, DEFAULT_FILE_PATH
 from pipeline import run_experiment
 
 
@@ -55,11 +55,15 @@ def summarize(tag: str, ml: dict, *, metric: str) -> list[dict]:
 def main() -> None:
     cfg_with = dict(CFG)
     cfg_with["USE_NEWS_SENTIMENT"] = True
-    res_with = run_experiment(cfg_with, "OZON_combined.csv", "results_with_news_cmp")
+    res_with = run_experiment(
+        cfg_with, CFG.get("FILE_PATH", DEFAULT_FILE_PATH), "results_with_news_cmp"
+    )
 
     cfg_no = dict(CFG)
     cfg_no["USE_NEWS_SENTIMENT"] = False
-    res_no = run_experiment(cfg_no, "OZON_combined.csv", "results_no_news_cmp")
+    res_no = run_experiment(
+        cfg_no, CFG.get("FILE_PATH", DEFAULT_FILE_PATH), "results_no_news_cmp"
+    )
 
     m = str(CFG.get("BEST_MODEL_METRIC", "RMSE"))
     rows = summarize("with_news", res_with["ml"], metric=m) + summarize(

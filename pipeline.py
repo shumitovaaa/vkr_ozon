@@ -24,6 +24,7 @@ import pandas as pd
 from scipy.stats import kurtosis, skew
 from statsmodels.tsa.stattools import adfuller
 
+from config import DEFAULT_FILE_PATH, DEFAULT_HORIZONS, DEFAULT_OUT_DIR
 from data.loader import load_data
 from data.validator import validate_data
 from features.builder import FeatureBuilder
@@ -50,6 +51,88 @@ from models.walk_forward import (
 )
 from models.stacking import fit_stacking
 from visualization.plots import Visualizer
+
+logger = logging.getLogger(__name__)
+
+_SUPPORTED_ARIMA_METRICS = frozenset({"MAE", "RMSE", "MAPE", "R2"})
+
+_EDA_WEEKDAY_NAMES: Dict[int, str] = {
+    0: "Mon",
+    1: "Tue",
+    2: "Wed",
+    3: "Thu",
+    4: "Fri",
+    5: "Sat",
+    6: "Sun",
+}
+_EDA_MONTH_NAMES: Dict[int, str] = {
+    1: "Jan",
+    2: "Feb",
+    3: "Mar",
+    4: "Apr",
+    5: "May",
+    6: "Jun",
+    7: "Jul",
+    8: "Aug",
+    9: "Sep",
+    10: "Oct",
+    11: "Nov",
+    12: "Dec",
+}
+
+
+def _horizons_from_cfg(cfg: Dict[str, Any]) -> list[int]:
+    """Список горизонтов из конфига с единым значением по умолчанию."""
+    return list(cfg.get("HORIZONS", list(DEFAULT_HORIZONS)))
+
+
+def _write_json_artifact(path: Path, payload: Any, *, log_prefix: str) -> bool:
+    try:
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        return True
+    except Exception as exc:
+        logger.warning("[%s] %s: %s", log_prefix, path.name, exc)
+        return False
+
+
+def _normalize_arima_metric_key(metric_key: str) -> str:
+    key = str(metric_key)
+    if key not in _SUPPORTED_ARIMA_METRICS:
+        logger.warning(
+            "[ARIMA-GARCH] метрика %s для выбора h не поддерживается, используем RMSE",
+            key,
+        )
+        return "RMSE"
+    return key
+
+
+def _arima_rolling_test_size(n_sr: int, cfg: Dict[str, Any]) -> int:
+    """Размер тестового окна для rolling ARIMA–GARCH по длине ряда лог-доходностей."""
+    min_train = int(cfg.get("ARIMA_GARCH_MIN_TRAIN", 100))
+    test_frac = float(cfg.get("TEST_FRACTION", 0.2))
+    test_size = max(1, int(n_sr * test_frac))
+    if cfg.get("ARIMA_MAX_TEST_DAYS"):
+        test_size = min(test_size, int(cfg["ARIMA_MAX_TEST_DAYS"]))
+    test_size = max(30, test_size)
+    cap_len = max(1, n_sr - 1)
+    if n_sr > min_train:
+        test_size = min(test_size, cap_len, n_sr - min_train)
+    else:
+        test_size = min(test_size, cap_len)
+    return max(1, test_size)
+
+
+def build_features_dataframe(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Подготовить ряд для EDA/ARIMA/ML: лог-доходности, индикаторы ТА, опционально новости.
+    """
+    out = df.copy()
+    out["log_ret"] = compute_log_returns(out["CLOSE"])
+    out = compute_indicators(out, cfg)
+    return attach_news_sentiment_features(out, cfg)
 
 
 def _arima_subframe_for_horizon(
@@ -107,9 +190,6 @@ def _arima_horizon_metrics_df(
     return pd.DataFrame(rows)
 
 
-logger = logging.getLogger(__name__)
-
-
 def export_eda_stats(
     df_feat: pd.DataFrame, out: Path, cfg: Dict[str, Any]
 ) -> None:
@@ -154,45 +234,20 @@ def export_eda_stats(
         logger.warning("[EDA] ADF calc failed: %s", exc)
         adf_summary = {"error": str(exc), "n_obs": int(len(log_ret))}
 
-    try:
-        (out / "eda_adf_log_ret.json").write_text(
-            json.dumps(adf_summary, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        logger.warning("[EDA] save eda_adf_log_ret.json: %s", exc)
+    _ = _write_json_artifact(
+        out / "eda_adf_log_ret.json", adf_summary, log_prefix="EDA"
+    )
 
     try:
-        idx = df_feat.index if isinstance(df_feat.index, pd.DatetimeIndex) else None
-        if idx is None:
-            tmp_dates = pd.to_datetime(df_feat.get("date"), errors="coerce")
-            idx = pd.DatetimeIndex(tmp_dates)
         base = pd.DataFrame({"log_ret": log_ret})
         base["weekday"] = base.index.dayofweek
         base["month"] = base.index.month
         weekday = (
             base.groupby("weekday")["log_ret"].mean().mul(100.0).reset_index()
         )
-        weekday["weekday_name"] = weekday["weekday"].map(
-            {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
-        )
+        weekday["weekday_name"] = weekday["weekday"].map(_EDA_WEEKDAY_NAMES)
         month = base.groupby("month")["log_ret"].mean().mul(100.0).reset_index()
-        month["month_name"] = month["month"].map(
-            {
-                1: "Jan",
-                2: "Feb",
-                3: "Mar",
-                4: "Apr",
-                5: "May",
-                6: "Jun",
-                7: "Jul",
-                8: "Aug",
-                9: "Sep",
-                10: "Oct",
-                11: "Nov",
-                12: "Dec",
-            }
-        )
+        month["month_name"] = month["month"].map(_EDA_MONTH_NAMES)
         weekday.rename(columns={"log_ret": "mean_log_ret_pct"}, inplace=True)
         month.rename(columns={"log_ret": "mean_log_ret_pct"}, inplace=True)
         weekday.to_csv(out / "eda_seasonality_weekday.csv", index=False, encoding="utf-8")
@@ -285,19 +340,7 @@ def run_hybrid_arima_garch(
         )
         return pd.DataFrame()
 
-    min_train = int(cfg.get("ARIMA_GARCH_MIN_TRAIN", 100))
-    test_frac = float(cfg.get("TEST_FRACTION", 0.2))
-    test_size = max(1, int(n_sr * test_frac))
-    if cfg.get("ARIMA_MAX_TEST_DAYS"):
-        test_size = min(test_size, int(cfg["ARIMA_MAX_TEST_DAYS"]))
-    test_size = max(30, test_size)
-    cap_len = max(1, n_sr - 1)
-    if n_sr > min_train:
-        test_size = min(test_size, cap_len, n_sr - min_train)
-    else:
-        test_size = min(test_size, cap_len)
-    if test_size < 1:
-        test_size = 1
+    test_size = _arima_rolling_test_size(n_sr, cfg)
     logger.info(
         "[ARIMA-GARCH] test_size=%s из len(log_ret)=%s (%.1f%% теста)",
         test_size,
@@ -310,7 +353,7 @@ def run_hybrid_arima_garch(
     if len(arima_order) < 3:
         arima_order = (1, 0, 1)
 
-    fh = list(cfg.get("ARIMA_FORECAST_HORIZONS", [1, 5, 10]))
+    fh = list(cfg.get("ARIMA_FORECAST_HORIZONS", list(DEFAULT_HORIZONS)))
     forecast_df = rolling_forecast_hybrid_arima_garch(
         y=series,
         test_size=test_size,
@@ -323,16 +366,12 @@ def run_hybrid_arima_garch(
         forecast_horizons=fh,
     )
 
-    metric_key = cfg.get("ARIMA_BEST_HORIZON_METRIC") or cfg.get(
-        "BEST_MODEL_METRIC", "RMSE"
-    )
-    metric_key = str(metric_key)
-    if metric_key not in ("MAE", "RMSE", "MAPE", "R2"):
-        logger.warning(
-            "[ARIMA-GARCH] метрика %s для выбора h не поддерживается, используем RMSE",
-            metric_key,
+    metric_key = _normalize_arima_metric_key(
+        str(
+            cfg.get("ARIMA_BEST_HORIZON_METRIC")
+            or cfg.get("BEST_MODEL_METRIC", "RMSE")
         )
-        metric_key = "RMSE"
+    )
     mdf = _arima_horizon_metrics_df(forecast_df, fh)
     best_h = int(fh[0]) if fh else 1
     best_meta: Dict[str, Any] = {}
@@ -356,20 +395,17 @@ def run_hybrid_arima_garch(
     except Exception as exc:
         logger.warning("[ARIMA-GARCH] сохранение arima_horizons_metrics.csv: %s", exc)
 
-    try:
-        summary = {
+    _ = _write_json_artifact(
+        out / "arima_best_horizon.json",
+        {
             "selection_metric": metric_key,
             "horizons_evaluated": [int(x) for x in fh],
             "metrics_by_horizon": mdf.to_dict("records") if not mdf.empty else [],
             "best_horizon": best_h,
             "best_metric_value": best_meta.get("value"),
-        }
-        (out / "arima_best_horizon.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False, default=str),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        logger.warning("[ARIMA-GARCH] сохранение arima_best_horizon.json: %s", exc)
+        },
+        log_prefix="ARIMA-GARCH",
+    )
 
     viz = Visualizer(out)
     label = cfg.get("ARIMA_PLOT_LABEL", "ARIMA-GARCH")
@@ -653,7 +689,7 @@ def run_ml(
     }
 
     viz = Visualizer(out)
-    horizons = list(cfg.get("HORIZONS", [1, 5, 10]))
+    horizons = _horizons_from_cfg(cfg)
     for h in horizons:
         _run_horizon_ml(h, X, tg, cfg, viz, results)
 
@@ -677,8 +713,10 @@ def run_ml(
             ob_name,
             ob_meta.get("value"),
         )
-    try:
-        summary = {
+    json_path = Path(out) / "best_models_wf.json"
+    if _write_json_artifact(
+        json_path,
+        {
             "selection_metric": metric_key,
             "per_horizon": {
                 str(h): results["wf_best"].get(h, {}) for h in horizons
@@ -687,15 +725,10 @@ def run_ml(
                 str(h): results["wf_best_clf"].get(h, {}) for h in horizons
             },
             "overall_across_horizons": results["wf_best_overall"],
-        }
-        json_path = Path(out) / "best_models_wf.json"
-        json_path.write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False, default=str),
-            encoding="utf-8",
-        )
+        },
+        log_prefix="ML",
+    ):
         logger.info("[ML] Сводка лучших WF-моделей: %s", json_path)
-    except Exception as exc:
-        logger.warning("[ML] сохранение best_models_wf.json: %s", exc)
 
     try:
         st_rows = []
@@ -727,7 +760,7 @@ def _export_news_ablation(
     ml_wo = run_ml(df_feat, cfg_wo, out)
 
     rows: list[dict[str, Any]] = []
-    horizons = list(cfg.get("HORIZONS", [1, 5, 10]))
+    horizons = _horizons_from_cfg(cfg)
     for h in horizons:
         base = ml_wo.get("wf_best", {}).get(h, {})
         with_news = {}
@@ -799,12 +832,7 @@ def run_experiment(
 
     df = load_data(data_path)
     df = validate_data(df, cfg)
-
-    df = df.copy()
-    df["log_ret"] = compute_log_returns(df["CLOSE"])
-
-    df_feat = compute_indicators(df, cfg)
-    df_feat = attach_news_sentiment_features(df_feat, cfg)
+    df_feat = build_features_dataframe(df, cfg)
     run_eda(df_feat, out, cfg)
     export_eda_stats(df_feat, out, cfg)
 
@@ -827,6 +855,6 @@ if __name__ == "__main__":
 
     run_experiment(
         cfg=CFG,
-        data_path=CFG.get("FILE_PATH", "OZON_combined.csv"),
-        out_dir=CFG.get("OUT_DIR", "./results"),
+        data_path=CFG.get("FILE_PATH", DEFAULT_FILE_PATH),
+        out_dir=CFG.get("OUT_DIR", DEFAULT_OUT_DIR),
     )

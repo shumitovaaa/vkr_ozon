@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from config import DEFAULT_HORIZONS
+
 from .returns import compute_log_returns
 
 logger = logging.getLogger(__name__)
@@ -119,7 +121,7 @@ class FeatureBuilder:
         Кумулятивная лог-доходность на h шагов вперёд; clf — знак > 0.
         """
         if horizons is None:
-            horizons = self.cfg.get("HORIZONS", [1, 5, 10])
+            horizons = self.cfg.get("HORIZONS", list(DEFAULT_HORIZONS))
 
         log_ret = compute_log_returns(df["CLOSE"])
         tgt = pd.DataFrame(index=df.index)

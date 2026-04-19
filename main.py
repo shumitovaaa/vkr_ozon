@@ -9,8 +9,10 @@ import logging
 import sys
 from typing import Optional
 
-from config import CFG
+from config import CFG, DEFAULT_FILE_PATH, DEFAULT_OUT_DIR
 from pipeline import run_experiment
+
+SMOKE_SAMPLE_ROWS = 50
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +33,7 @@ def smoke_test(filepath: str) -> None:
     from features.builder import FeatureBuilder
     from features.indicators import compute_indicators
 
-    raw = load_data(filepath).head(50)
+    raw = load_data(filepath).head(SMOKE_SAMPLE_ROWS)
     raw = validate_data(raw, CFG)
     df = compute_indicators(raw, CFG)
     fb = FeatureBuilder(CFG)
@@ -47,8 +49,8 @@ def smoke_test(filepath: str) -> None:
 
 def run(data_path: Optional[str] = None, out_dir: Optional[str] = None) -> None:
     """Запуск run_experiment с путями из аргументов или CFG."""
-    path = data_path or CFG.get("FILE_PATH", "OZON_combined.csv")
-    out = out_dir or CFG.get("OUT_DIR", "./results")
+    path = data_path or CFG.get("FILE_PATH", DEFAULT_FILE_PATH)
+    out = out_dir or CFG.get("OUT_DIR", DEFAULT_OUT_DIR)
     run_experiment(cfg=CFG, data_path=path, out_dir=out)
 
 
@@ -58,7 +60,7 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=str, default=None)
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
-    default_data = CFG.get("FILE_PATH", "OZON_combined.csv")
+    default_data = CFG.get("FILE_PATH", DEFAULT_FILE_PATH)
     if args.smoke:
         smoke_test(args.data or default_data)
     else:

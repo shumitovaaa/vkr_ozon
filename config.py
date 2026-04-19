@@ -9,6 +9,11 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
+# Значения по умолчанию для путей и горизонтов (единый источник для CFG и fallback в коде)
+DEFAULT_FILE_PATH = "OZON_combined.csv"
+DEFAULT_OUT_DIR = "./results"
+DEFAULT_HORIZONS: tuple[int, ...] = (1, 5, 10)
+
 CFG: Dict[str, Any] = {
     "SMA_PERIODS": [20, 50, 200],
     "RSI_PERIOD": 14,
@@ -28,14 +33,14 @@ CFG: Dict[str, Any] = {
     "NORMALIZE_OBV": True,
     "WINSORIZE_OUTLIERS": False,
     "OUTLIER_ZSCORE": 3.5,
-    "HORIZONS": [1, 5, 10],
+    "HORIZONS": list(DEFAULT_HORIZONS),
     "WF_SPLITS": 10,
     "TEST_FRACTION": 0.2,
     "TRAIN_WINDOW": 504,
     "EMBARGO_DAYS": 10,
     "ARIMA_MAX_TEST_DAYS": None,
     # Горизонты rolling ARIMA(-GARCH): h=1 — гибрид с GARCH; h>1 — кумулятивный прогноз
-    "ARIMA_FORECAST_HORIZONS": [1, 5, 10],
+    "ARIMA_FORECAST_HORIZONS": list(DEFAULT_HORIZONS),
     # Метрика для выбора лучшего h на графике ARIMA (None = как BEST_MODEL_METRIC)
     "ARIMA_BEST_HORIZON_METRIC": None,
     # Выбор лучшей WF-модели: MAE, RMSE, MAPE (минимум) или R2 (максимум)
@@ -71,8 +76,8 @@ CFG: Dict[str, Any] = {
     "LGBCLF_MIN_CHILD_SAMPLES": None,
     "LGBCLF_SUBSAMPLE": None,
     "LGBCLF_COLSAMPLE_BYTREE": None,
-    "OUT_DIR": "./results",
-    "FILE_PATH": "OZON_combined.csv",
+    "OUT_DIR": DEFAULT_OUT_DIR,
+    "FILE_PATH": DEFAULT_FILE_PATH,
     "COMMISSION": 0.0005,
     "USE_NEWS_SENTIMENT": True,
     # Доп. прогон ML без новостей + CSV сравнения with/without news
