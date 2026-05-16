@@ -1,0 +1,2 @@
+horizon,model,MAE,RMSE,MAPE,MDA_%,R2,IC,IC_pval
+5,Stacking(RF+LGB),0.032487,0.042354,146.8321,41.98,-0.1426,-0.1332,0.038

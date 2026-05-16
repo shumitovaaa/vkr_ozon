@@ -39,6 +39,10 @@ from evaluation.metrics import (
 )
 from models.scaling import robust_scale_train_test
 
+# Базовый префикс «модели» ARIMA(-GARCH) в сводных таблицах сравнения.
+# Для h=1 используется гибрид ARIMA+GARCH; для h>1 — кумулятивный прогноз ARIMA.
+ARIMA_GARCH_MODEL_LABEL = "ARIMA-GARCH"
+
 try:
     from arch import arch_model
 
@@ -260,7 +264,11 @@ def walk_forward_train_eval(
         y_r_tr, y_r_te = y_reg.iloc[tr_idx], y_reg.iloc[te_idx]
         y_c_tr, y_c_te = y_clf.iloc[tr_idx], y_clf.iloc[te_idx]
 
-        Xs_tr, Xs_te = robust_scale_train_test(X_tr, X_te)
+        Xs_tr, Xs_te = robust_scale_train_test(
+            X_tr,
+            X_te,
+            winsorize=bool(cfg.get("WINSORIZE_OUTLIERS", False)),
+        )
         sample_w = _crisis_sample_weights(X_tr)
 
         fold_preds = pd.DataFrame(
@@ -535,3 +543,84 @@ def rolling_forecast_hybrid_arima_garch(
     }
     out_dict.update({k: v for k, v in extra.items()})
     return pd.DataFrame(out_dict, index=pd.Index(idx_test, name="date"))
+
+
+def _arima_forecast_columns_for_horizon(h: int) -> Tuple[str, str]:
+    """Имена колонок (y_realized, mu_forecast) в forecast_df для горизонта h."""
+    h = int(h)
+    if h == 1:
+        return COL_Y_REALIZED, COL_MU_FORECAST
+    return f"y_realized_h{h}", f"mu_forecast_h{h}"
+
+
+def arima_garch_classification_from_forecasts(
+    forecast_df: pd.DataFrame,
+    forecast_horizons: Sequence[int],
+    *,
+    label_prefix: str = ARIMA_GARCH_MODEL_LABEL,
+) -> List[Dict[str, Any]]:
+    """
+    Превратить прогнозы кумулятивной лог-доходности в классификацию направления.
+
+    Логика преобразования (точно та же, что и для ML-классификаторов в FeatureBuilder):
+
+    .. math::
+
+       y^{clf}_t = \\mathbf{1}\\bigl[\\text{reg}_h(t) > 0\\bigr], \\quad
+       \\hat{y}^{clf}_t = \\mathbf{1}\\bigl[\\hat{\\mu}_h(t) > 0\\bigr].
+
+    Для AUC в роли «вероятности класса 1» подаётся сам прогноз условного среднего
+    :math:`\\hat{\\mu}_h` — он монотонно возрастает по «шансам роста» и даёт
+    корректную ROC-оценку без явной логистической калибровки. Порог классификации
+    фиксированный нулевой, т.к. знак суммы лог-доходностей экономически равен
+    направлению цены за период h.
+
+    Parameters
+    ----------
+    forecast_df
+        Выход :func:`rolling_forecast_hybrid_arima_garch` с колонками для каждого h
+        (для h=1 — ``y_realized``/``mu_forecast``; для h>1 — ``*_h{h}``).
+    forecast_horizons
+        Набор горизонтов, по которым считать классификационные метрики.
+    label_prefix
+        Префикс имени модели в результате (например, ``ARIMA-GARCH``).
+
+    Returns
+    -------
+    Список словарей метрик ``classification_metrics`` для каждого валидного h
+    (с дополнительными ключами ``horizon`` и ``n_obs``).
+    """
+    rows: List[Dict[str, Any]] = []
+    if forecast_df is None or forecast_df.empty:
+        return rows
+
+    for h in forecast_horizons:
+        col_y, col_mu = _arima_forecast_columns_for_horizon(int(h))
+        if col_y not in forecast_df.columns or col_mu not in forecast_df.columns:
+            continue
+        sub = forecast_df[[col_y, col_mu]].dropna()
+        if len(sub) < 2:
+            continue
+
+        y_true = (sub[col_y].to_numpy(dtype=np.float64) > 0).astype(int)
+        mu_hat = sub[col_mu].to_numpy(dtype=np.float64)
+        y_pred = (mu_hat > 0).astype(int)
+
+        try:
+            metrics = classification_metrics(
+                y_true=y_true,
+                y_pred=y_pred,
+                y_prob=mu_hat,
+                label=f"{label_prefix}_h{int(h)}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ARIMA-GARCH-CLF] h=%s: classification_metrics failed: %s", h, exc
+            )
+            continue
+
+        metrics["horizon"] = int(h)
+        metrics["n_obs"] = int(len(sub))
+        rows.append(metrics)
+
+    return rows

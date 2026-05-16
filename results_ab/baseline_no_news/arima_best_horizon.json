@@ -1,0 +1,62 @@
+{
+  "selection_metric": "RMSE",
+  "horizons_evaluated": [
+    1,
+    5,
+    10
+  ],
+  "metrics_by_horizon": [
+    {
+      "horizon": 1,
+      "model": "ARIMA_h1",
+      "MAE": 0.014833,
+      "RMSE": 0.020495,
+      "MAPE": 12580.6833,
+      "R2": -0.0099
+    },
+    {
+      "horizon": 5,
+      "model": "ARIMA_h5",
+      "MAE": 0.03123,
+      "RMSE": 0.040108,
+      "MAPE": 100.5092,
+      "R2": -0.0379
+    },
+    {
+      "horizon": 10,
+      "model": "ARIMA_h10",
+      "MAE": 0.04874,
+      "RMSE": 0.059258,
+      "MAPE": 107.5621,
+      "R2": -0.0682
+    }
+  ],
+  "classification_metrics_by_horizon": [
+    {
+      "horizon": 1,
+      "model": "ARIMA-GARCH_h1",
+      "Accuracy": 0.4961,
+      "F1": 0.6484,
+      "AUC": 0.4306,
+      "n_obs": 254
+    },
+    {
+      "horizon": 5,
+      "model": "ARIMA-GARCH_h5",
+      "Accuracy": 0.576,
+      "F1": 0.7296,
+      "AUC": 0.3802,
+      "n_obs": 250
+    },
+    {
+      "horizon": 10,
+      "model": "ARIMA-GARCH_h10",
+      "Accuracy": 0.5551,
+      "F1": 0.7139,
+      "AUC": 0.2836,
+      "n_obs": 245
+    }
+  ],
+  "best_horizon": 1,
+  "best_metric_value": 0.020495
+}

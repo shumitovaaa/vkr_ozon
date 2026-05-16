@@ -42,6 +42,10 @@ def compute_indicators(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
     vol = df["VOL"]
     log_ret = np.log(close / close.shift(1))
 
+    n_lags = max(0, int(cfg.get("N_LAGS", 0)))
+    for k in range(1, n_lags + 1):
+        out[f"log_ret_lag{k}"] = log_ret.shift(int(k))
+
     for p in cfg.get("SMA_PERIODS", [20, 50, 200]):
         out[f"sma{p}"] = ta.trend.sma_indicator(close, window=int(p))
 
@@ -85,9 +89,10 @@ def compute_indicators(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
     out["ret_abs_ma20"] = log_ret.abs().rolling(20).mean()
 
     obv = ta.volume.on_balance_volume(close, vol)
-    obv_w = int(cfg.get("OBV_WINDOW", 20))
-    obv_ma = obv.rolling(obv_w).mean()
-    obv_std = obv.rolling(obv_w).std()
+    obv_norm_w = int(cfg.get("OBV_NORM_WINDOW", cfg.get("OBV_WINDOW", 20)))
+    obv_norm_w = max(2, obv_norm_w)
+    obv_ma = obv.rolling(obv_norm_w).mean()
+    obv_std = obv.rolling(obv_norm_w).std()
     out["OBV_z"] = (obv - obv_ma) / (obv_std + 1e-8)
 
     idx = df.index

@@ -1,3 +1,14 @@
+from .comparison import (
+    CLASSIFICATION_METRIC_COLS,
+    REGRESSION_METRIC_COLS,
+    assemble_comparison_summary,
+    build_arima_classification_table,
+    build_arima_regression_table,
+    build_ml_classification_comparison,
+    build_ml_regression_comparison,
+    safe_to_csv,
+    winners_table,
+)
 from .metrics import (
     Evaluator,
     regression_metrics,
@@ -18,4 +29,13 @@ __all__ = [
     "validate_residuals",
     "information_coefficient",
     "mda",
+    "REGRESSION_METRIC_COLS",
+    "CLASSIFICATION_METRIC_COLS",
+    "build_ml_regression_comparison",
+    "build_ml_classification_comparison",
+    "build_arima_regression_table",
+    "build_arima_classification_table",
+    "assemble_comparison_summary",
+    "winners_table",
+    "safe_to_csv",
 ]

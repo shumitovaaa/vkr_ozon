@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from config import DEFAULT_HORIZONS
+from config import DEFAULT_HORIZONS, resolve_news_features_flag
 
 from .returns import compute_log_returns
 
@@ -67,8 +67,11 @@ class FeatureBuilder:
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
         self.cfg = cfg
+        self.use_news_features = resolve_news_features_flag(cfg)
         cols = list(FEATURE_COLS)
-        if bool(cfg.get("USE_NEWS_SENTIMENT", False)):
+        n_lags = max(0, int(cfg.get("N_LAGS", 0)))
+        cols.extend(f"log_ret_lag{k}" for k in range(1, n_lags + 1))
+        if self.use_news_features:
             cols = cols + NEWS_FEATURE_COLS
         self.feature_cols = cols
 

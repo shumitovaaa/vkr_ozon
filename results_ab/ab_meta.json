@@ -1,0 +1,25 @@
+{
+  "data_path": "OZON_combined.csv",
+  "horizons": [
+    1,
+    5,
+    10
+  ],
+  "out_baseline_no_news": "results_ab/baseline_no_news",
+  "out_news_enhanced": "results_ab/news_enhanced",
+  "best_model_metric": "RMSE",
+  "wf_splits": 10,
+  "test_fraction": 0.2,
+  "embargo_days": 10,
+  "train_window": 504,
+  "seed": 42,
+  "arima_order": [
+    1,
+    0,
+    1
+  ],
+  "arima_garch_used": true,
+  "news_csv_path": "data/news.csv",
+  "news_model": "seara/rubert-tiny2-russian-sentiment",
+  "interpretation": "delta_with_minus_no = with_news − no_news. Для MAE/RMSE/MAPE отрицательная Δ означает улучшение от новостей. Для R2/MDA_%/IC/Accuracy/F1/AUC — положительная Δ означает улучшение."
+}

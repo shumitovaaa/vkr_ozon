@@ -14,6 +14,36 @@ DEFAULT_FILE_PATH = "OZON_combined.csv"
 DEFAULT_OUT_DIR = "./results"
 DEFAULT_HORIZONS: tuple[int, ...] = (1, 5, 10)
 
+def resolve_news_features_flag(cfg: Dict[str, Any]) -> bool:
+    """
+    Единая точка получения значения переключателя «использовать ли новости».
+
+    Приоритет: ``USE_NEWS_FEATURES`` → ``USE_NEWS_SENTIMENT``. Любая правда
+    в любом из ключей включает новости (False имеет приоритет, только если
+    оба ключа явно False). Это убирает риск того, что ``run_experiment``
+    выставит один ключ, а потребитель проверит другой и наоборот.
+
+    Returns
+    -------
+    bool
+        True — собирать и подключать новостные признаки; False — baseline.
+    """
+    has_canonical = "USE_NEWS_FEATURES" in cfg
+    has_legacy = "USE_NEWS_SENTIMENT" in cfg
+    if has_canonical and has_legacy:
+        return bool(cfg.get("USE_NEWS_FEATURES")) and bool(cfg.get("USE_NEWS_SENTIMENT"))
+    if has_canonical:
+        return bool(cfg.get("USE_NEWS_FEATURES"))
+    return bool(cfg.get("USE_NEWS_SENTIMENT", False))
+
+
+def set_news_features_flag(cfg: Dict[str, Any], value: bool) -> Dict[str, Any]:
+    """Согласованно проставить оба ключа (канонический + алиас); cfg-копия не делается."""
+    cfg["USE_NEWS_FEATURES"] = bool(value)
+    cfg["USE_NEWS_SENTIMENT"] = bool(value)
+    return cfg
+
+
 CFG: Dict[str, Any] = {
     "SMA_PERIODS": [20, 50, 200],
     "RSI_PERIOD": 14,
@@ -25,12 +55,15 @@ CFG: Dict[str, Any] = {
     "MACD_FAST": 12,
     "MACD_SLOW": 26,
     "MACD_SIGNAL": 9,
+    # Лаги ln(C_t/C_{t-1}) как log_ret_lag1..log_ret_lagN в индикаторах и в X
     "N_LAGS": 10,
+    # Окно rolling mean/std для OBV_z (если не задано — используется OBV_WINDOW)
     "OBV_NORM_WINDOW": 50,
     "OBV_WINDOW": 20,
     "USE_LOG_RET": True,
     "ADD_TIME_FEATURES": True,
     "NORMALIZE_OBV": True,
+    # Винзоризация признаков по квантилям train (5%/95%) перед RobustScaler в WF/стекинге
     "WINSORIZE_OUTLIERS": False,
     "OUTLIER_ZSCORE": 3.5,
     "HORIZONS": list(DEFAULT_HORIZONS),
@@ -79,9 +112,18 @@ CFG: Dict[str, Any] = {
     "OUT_DIR": DEFAULT_OUT_DIR,
     "FILE_PATH": DEFAULT_FILE_PATH,
     "COMMISSION": 0.0005,
+    # Канонический переключатель A/B: True = news-enhanced, False = baseline без новостей.
+    # Алиас USE_NEWS_SENTIMENT сохранён ради обратной совместимости — при старте
+    # пайплайн синхронизирует значения (см. config.resolve_news_features_flag).
+    "USE_NEWS_FEATURES": True,
     "USE_NEWS_SENTIMENT": True,
-    # Доп. прогон ML без новостей + CSV сравнения with/without news
+    # Включает A/B сравнение в одном запуске: pipeline.run_ab_comparison делает два
+    # прогона с одинаковыми сплитами и сохраняет таблицу с Δ-метриками
+    # (см. ab_comparison_*.csv в каталоге результатов).
     "RUN_NEWS_ABLATION": False,
+    # Подкаталоги для A/B (относительно OUT_DIR).
+    "AB_BASELINE_SUBDIR": "baseline_no_news",
+    "AB_NEWS_SUBDIR": "news_enhanced",
     "NEWS_CSV_PATH": "data/news.csv",
     "NEWS_MODEL": "seara/rubert-tiny2-russian-sentiment",
     "NEWS_BATCH_SIZE": 8,

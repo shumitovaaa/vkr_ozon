@@ -45,7 +45,11 @@ def fit_stacking(
     """
     seed = cfg.get("SEED", cfg.get("RANDOM_STATE", 42))
 
-    Xs_tr, Xs_te = robust_scale_train_test(X_train, X_test)
+    Xs_tr, Xs_te = robust_scale_train_test(
+        X_train,
+        X_test,
+        winsorize=bool(cfg.get("WINSORIZE_OUTLIERS", False)),
+    )
 
     split = int(len(Xs_tr) * 0.8)
 

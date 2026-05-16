@@ -24,12 +24,24 @@ import pandas as pd
 from scipy.stats import kurtosis, skew
 from statsmodels.tsa.stattools import adfuller
 
-from config import DEFAULT_FILE_PATH, DEFAULT_HORIZONS, DEFAULT_OUT_DIR
+from config import (
+    DEFAULT_FILE_PATH,
+    DEFAULT_HORIZONS,
+    DEFAULT_OUT_DIR,
+    resolve_news_features_flag,
+    set_news_features_flag,
+)
 from data.loader import load_data
 from data.validator import validate_data
-from features.builder import FeatureBuilder
-from features.indicators import compute_indicators
-from news.merge import attach_news_sentiment_features
+from evaluation.comparison import (
+    assemble_comparison_summary,
+    build_arima_classification_table,
+    build_arima_regression_table,
+    build_ml_classification_comparison,
+    build_ml_regression_comparison,
+    safe_to_csv,
+    winners_table,
+)
 from evaluation.metrics import (
     buy_hold_metrics,
     regression_metrics,
@@ -40,16 +52,20 @@ from evaluation.wf_selection import (
     overall_best_across_horizons,
     select_best_model,
 )
+from features.builder import FeatureBuilder
+from features.indicators import compute_indicators
 from features.returns import compute_log_returns
+from models.stacking import fit_stacking
 from models.walk_forward import (
     COL_CI_LOWER,
     COL_CI_UPPER,
     COL_MU_FORECAST,
     COL_Y_REALIZED,
+    arima_garch_classification_from_forecasts,
     rolling_forecast_hybrid_arima_garch,
     walk_forward_train_eval,
 )
-from models.stacking import fit_stacking
+from news.merge import attach_news_sentiment_features
 from visualization.plots import Visualizer
 
 logger = logging.getLogger(__name__)
@@ -188,6 +204,32 @@ def _arima_horizon_metrics_df(
             }
         )
     return pd.DataFrame(rows)
+
+
+def _arima_horizon_clf_metrics_df(
+    forecast_df: pd.DataFrame, fh: Sequence[int]
+) -> pd.DataFrame:
+    """
+    Классификационные метрики ARIMA-GARCH по тестовому окну для каждого h.
+
+    Преобразование ``regression → classification``:
+    знак прогноза кумулятивной лог-доходности (`mu_forecast`) интерпретируется
+    как направление движения (1 — «вверх», 0 — «вниз/нейтрально»). Это та же
+    операция, которую FeatureBuilder применяет к ML-таргету (`reg_h → clf_h`),
+    что обеспечивает идентичную постановку задачи у ARIMA-GARCH и у RF/LGB.
+
+    Шкала классификатора (для AUC) — сам ``mu_forecast``: монотонная по
+    «шансу роста» функция, корректная для ROC без дополнительной калибровки.
+    """
+    rows = arima_garch_classification_from_forecasts(forecast_df, fh)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    cols_order = ["horizon", "model", "Accuracy", "F1", "AUC", "n_obs"]
+    cols = [c for c in cols_order if c in out.columns] + [
+        c for c in out.columns if c not in cols_order
+    ]
+    return out[cols]
 
 
 def export_eda_stats(
@@ -373,6 +415,7 @@ def run_hybrid_arima_garch(
         )
     )
     mdf = _arima_horizon_metrics_df(forecast_df, fh)
+    cdf = _arima_horizon_clf_metrics_df(forecast_df, fh)
     best_h = int(fh[0]) if fh else 1
     best_meta: Dict[str, Any] = {}
     if not mdf.empty and metric_key in mdf.columns:
@@ -395,12 +438,31 @@ def run_hybrid_arima_garch(
     except Exception as exc:
         logger.warning("[ARIMA-GARCH] сохранение arima_horizons_metrics.csv: %s", exc)
 
+    if not cdf.empty:
+        try:
+            cdf.to_csv(
+                out / "arima_horizons_clf_metrics.csv",
+                index=False,
+                encoding="utf-8",
+            )
+            logger.info(
+                "[ARIMA-GARCH-CLF] Сохранены классификационные метрики: %s",
+                out / "arima_horizons_clf_metrics.csv",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ARIMA-GARCH-CLF] сохранение arima_horizons_clf_metrics.csv: %s", exc
+            )
+
     _ = _write_json_artifact(
         out / "arima_best_horizon.json",
         {
             "selection_metric": metric_key,
             "horizons_evaluated": [int(x) for x in fh],
             "metrics_by_horizon": mdf.to_dict("records") if not mdf.empty else [],
+            "classification_metrics_by_horizon": (
+                cdf.to_dict("records") if not cdf.empty else []
+            ),
             "best_horizon": best_h,
             "best_metric_value": best_meta.get("value"),
         },
@@ -746,115 +808,235 @@ def run_ml(
     return results
 
 
-def _export_news_ablation(
-    df_feat: pd.DataFrame, cfg: Dict[str, Any], out: Path
-) -> None:
-    """
-    Доп. запуск ML без новостей и сравнение c основным прогоном.
-    """
-    if not bool(cfg.get("RUN_NEWS_ABLATION", False)):
-        return
-    cfg_wo = dict(cfg)
-    cfg_wo["USE_NEWS_SENTIMENT"] = False
-    logger.info("[ABLATION] Запуск ML без новостных признаков")
-    ml_wo = run_ml(df_feat, cfg_wo, out)
-
-    rows: list[dict[str, Any]] = []
-    horizons = _horizons_from_cfg(cfg)
-    for h in horizons:
-        base = ml_wo.get("wf_best", {}).get(h, {})
-        with_news = {}
-        path_with = out / f"wf_reg_mean_h{h}.csv"
-        path_without = out / f"wf_reg_mean_h{h}_no_news.csv"
-        try:
-            # сохраним no-news сводку отдельно
-            agg_wo = ml_wo.get("wf_reg_agg", {}).get(h)
-            if isinstance(agg_wo, pd.DataFrame) and not agg_wo.empty:
-                agg_wo.to_csv(path_without, index=False, encoding="utf-8")
-            if path_with.exists():
-                df_with = pd.read_csv(path_with)
-                if "model" in df_with.columns:
-                    mname = str(
-                        (json.loads((out / "best_models_wf.json").read_text(encoding="utf-8")))
-                        .get("per_horizon", {})
-                        .get(str(h), {})
-                        .get("model", "")
-                    )
-                    if mname:
-                        sub = df_with[df_with["model"] == mname]
-                        if not sub.empty:
-                            with_news = sub.iloc[0].to_dict()
-        except Exception:
-            with_news = {}
-        row: dict[str, Any] = {"horizon": int(h)}
-        mae_with = with_news.get("MAE")
-        mae_wo = None
-        if isinstance(base, dict):
-            best_model_wo = base.get("model", "")
-            agg_wo = ml_wo.get("wf_reg_agg", {}).get(h)
-            if isinstance(agg_wo, pd.DataFrame) and not agg_wo.empty and best_model_wo:
-                sub_wo = agg_wo[agg_wo["model"] == best_model_wo]
-                if not sub_wo.empty:
-                    mae_wo = float(sub_wo.iloc[0].get("MAE"))
-                    row["without_news_model"] = best_model_wo
-                    row["without_news_MAE"] = mae_wo
-        if mae_with is not None:
-            row["with_news_MAE"] = float(mae_with)
-        if mae_with is not None and mae_wo is not None and mae_wo != 0:
-            row["delta_mae_pct_vs_without"] = float((mae_with - mae_wo) / mae_wo * 100.0)
-        rows.append(row)
-
-    try:
-        if rows:
-            pd.DataFrame(rows).to_csv(
-                out / "ablation_news_vs_no_news.csv", index=False, encoding="utf-8"
-            )
-    except Exception as exc:
-        logger.warning("[ABLATION] save ablation_news_vs_no_news.csv: %s", exc)
-
-
 def run_experiment(
     cfg: Dict[str, Any],
     data_path: str | Path,
     out_dir: str | Path,
+    *,
+    use_news_features: bool | None = None,
 ) -> Dict[str, Any]:
     """
     Полный эксперимент: загрузка, валидация, индикаторы, EDA, ARIMA–GARCH, ML.
 
+    Parameters
+    ----------
+    cfg
+        Словарь конфигурации (не мутируется: внутри делается копия и в неё
+        проставляются ``USE_NEWS_FEATURES`` и ``USE_NEWS_SENTIMENT``).
+    data_path
+        Путь к CSV котировок.
+    out_dir
+        Каталог результатов прогона.
+    use_news_features
+        Жёсткое переопределение режима. ``True`` — собрать новостные признаки и
+        включить их в X (news-enhanced); ``False`` — baseline без новостей;
+        ``None`` — взять значение из ``cfg`` (см. ``resolve_news_features_flag``).
+
     Returns
     -------
-    Словарь с ключами data, arima_garch, ml, out_dir.
+    Словарь с ключами ``data``, ``arima_garch``, ``ml``, ``out_dir``,
+    ``use_news_features``.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    logger.info("[PIPELINE] Start experiment: data=%s, out=%s", data_path, out)
+    cfg_run: Dict[str, Any] = dict(cfg)
+    if use_news_features is None:
+        use_news_features = resolve_news_features_flag(cfg_run)
+    set_news_features_flag(cfg_run, bool(use_news_features))
+
+    logger.info(
+        "[PIPELINE] Start experiment: data=%s, out=%s, use_news_features=%s",
+        data_path,
+        out,
+        bool(use_news_features),
+    )
 
     df = load_data(data_path)
-    df = validate_data(df, cfg)
-    df_feat = build_features_dataframe(df, cfg)
-    run_eda(df_feat, out, cfg)
-    export_eda_stats(df_feat, out, cfg)
+    df = validate_data(df, cfg_run)
+    df_feat = build_features_dataframe(df, cfg_run)
+    run_eda(df_feat, out, cfg_run)
+    export_eda_stats(df_feat, out, cfg_run)
 
-    arima_garch_df = run_hybrid_arima_garch(df_feat, cfg, out)
-    ml_results = run_ml(df_feat, cfg, out)
-    _export_news_ablation(df_feat, cfg, out)
+    arima_garch_df = run_hybrid_arima_garch(df_feat, cfg_run, out)
+    ml_results = run_ml(df_feat, cfg_run, out)
 
-    logger.info("[PIPELINE] Experiment finished")
+    logger.info("[PIPELINE] Experiment finished (use_news_features=%s)", bool(use_news_features))
 
     return {
         "data": df_feat,
         "arima_garch": arima_garch_df,
         "ml": ml_results,
         "out_dir": str(out),
+        "use_news_features": bool(use_news_features),
+    }
+
+
+def run_ab_comparison(
+    cfg: Dict[str, Any],
+    data_path: str | Path,
+    out_dir: str | Path,
+) -> Dict[str, Any]:
+    """
+    Честный A/B эксперимент: два прогона ``run_experiment`` с одинаковыми сплитами,
+    моделями и сидами — отличие только в ``USE_NEWS_FEATURES``.
+
+    Структура каталога ``out_dir``:
+
+    .. code-block::
+
+        <out_dir>/
+            baseline_no_news/      ← полный run_experiment без новостных признаков
+            news_enhanced/         ← полный run_experiment с новостями
+            ab_comparison_regression.csv     ← длинная Δ-таблица (ML)
+            ab_comparison_classification.csv ← длинная Δ-таблица (ML)
+            ab_comparison_arima_regression.csv     ← ARIMA-GARCH per horizon
+            ab_comparison_arima_classification.csv ← ARIMA-GARCH per horizon
+            ab_comparison_summary.csv        ← объединённая длинная таблица
+            ab_winners_regression.csv        ← доля моделей с улучшением
+            ab_winners_classification.csv    ← доля моделей с улучшением
+            ab_meta.json                     ← метаданные прогонов
+    """
+    out_root = Path(out_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    base_subdir = str(cfg.get("AB_BASELINE_SUBDIR", "baseline_no_news"))
+    news_subdir = str(cfg.get("AB_NEWS_SUBDIR", "news_enhanced"))
+    out_no = out_root / base_subdir
+    out_with = out_root / news_subdir
+    out_no.mkdir(parents=True, exist_ok=True)
+    out_with.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "[AB] A/B сравнение: baseline → %s, news-enhanced → %s",
+        out_no,
+        out_with,
+    )
+
+    # 1) Baseline (без новостей)
+    res_no = run_experiment(cfg, data_path, out_no, use_news_features=False)
+    # 2) News-enhanced (с новостями)
+    res_with = run_experiment(cfg, data_path, out_with, use_news_features=True)
+
+    horizons = _horizons_from_cfg(cfg)
+
+    # ML регрессия / классификация
+    ml_reg = build_ml_regression_comparison(res_no["ml"], res_with["ml"], horizons)
+    ml_clf = build_ml_classification_comparison(res_no["ml"], res_with["ml"], horizons)
+
+    # ARIMA-GARCH (одинаковая модель в обоих режимах — записываем оба для прозрачности)
+    arima_reg_no = build_arima_regression_table(res_no["arima_garch"], horizons)
+    arima_reg_with = build_arima_regression_table(res_with["arima_garch"], horizons)
+    arima_clf_no = build_arima_classification_table(res_no["arima_garch"], horizons)
+    arima_clf_with = build_arima_classification_table(res_with["arima_garch"], horizons)
+
+    # Сохраняем артефакты
+    if not ml_reg.empty:
+        safe_to_csv(ml_reg, out_root / "ab_comparison_regression.csv", log_tag="[AB]")
+    if not ml_clf.empty:
+        safe_to_csv(ml_clf, out_root / "ab_comparison_classification.csv", log_tag="[AB]")
+
+    # ARIMA сводки в обоих режимах: метрики и для baseline, и для news (они равны).
+    if not arima_reg_no.empty or not arima_reg_with.empty:
+        if not arima_reg_no.empty:
+            safe_to_csv(
+                arima_reg_no,
+                out_root / "ab_comparison_arima_regression_no_news.csv",
+                log_tag="[AB]",
+            )
+        if not arima_reg_with.empty:
+            safe_to_csv(
+                arima_reg_with,
+                out_root / "ab_comparison_arima_regression_with_news.csv",
+                log_tag="[AB]",
+            )
+    if not arima_clf_no.empty or not arima_clf_with.empty:
+        if not arima_clf_no.empty:
+            safe_to_csv(
+                arima_clf_no,
+                out_root / "ab_comparison_arima_classification_no_news.csv",
+                log_tag="[AB]",
+            )
+        if not arima_clf_with.empty:
+            safe_to_csv(
+                arima_clf_with,
+                out_root / "ab_comparison_arima_classification_with_news.csv",
+                log_tag="[AB]",
+            )
+
+    # Сводный «единый» отчёт
+    summary = assemble_comparison_summary(
+        ml_reg=ml_reg,
+        ml_clf=ml_clf,
+        arima_reg_no_news=arima_reg_no,
+        arima_reg_with_news=arima_reg_with,
+        arima_clf_no_news=arima_clf_no,
+        arima_clf_with_news=arima_clf_with,
+    )
+    if not summary.empty:
+        safe_to_csv(summary, out_root / "ab_comparison_summary.csv", log_tag="[AB]")
+
+    # Свёртка по горизонтам/метрикам: «доля моделей, у которых новости улучшили метрику»
+    win_reg = winners_table(ml_reg)
+    win_clf = winners_table(ml_clf)
+    if not win_reg.empty:
+        safe_to_csv(win_reg, out_root / "ab_winners_regression.csv", log_tag="[AB]")
+    if not win_clf.empty:
+        safe_to_csv(win_clf, out_root / "ab_winners_classification.csv", log_tag="[AB]")
+
+    # Метаданные A/B
+    meta = {
+        "data_path": str(data_path),
+        "horizons": [int(h) for h in horizons],
+        "out_baseline_no_news": str(out_no),
+        "out_news_enhanced": str(out_with),
+        "best_model_metric": str(cfg.get("BEST_MODEL_METRIC", "RMSE")),
+        "wf_splits": int(cfg.get("WF_SPLITS", 10)),
+        "test_fraction": float(cfg.get("TEST_FRACTION", 0.2)),
+        "embargo_days": int(cfg.get("EMBARGO_DAYS", 10)),
+        "train_window": int(cfg.get("TRAIN_WINDOW", 504)),
+        "seed": int(cfg.get("SEED", cfg.get("RANDOM_STATE", 42))),
+        "arima_order": list(cfg.get("ARIMA_ORDER", [1, 0, 1])),
+        "arima_garch_used": bool(cfg.get("USE_ARIMA_GARCH", True)),
+        "news_csv_path": cfg.get("NEWS_CSV_PATH"),
+        "news_model": cfg.get("NEWS_MODEL"),
+        "interpretation": (
+            "delta_with_minus_no = with_news − no_news. "
+            "Для MAE/RMSE/MAPE отрицательная Δ означает улучшение от новостей. "
+            "Для R2/MDA_%/IC/Accuracy/F1/AUC — положительная Δ означает улучшение."
+        ),
+    }
+    _ = _write_json_artifact(out_root / "ab_meta.json", meta, log_prefix="AB")
+
+    logger.info("[AB] A/B сравнение завершено: %s", out_root)
+    return {
+        "out_dir": str(out_root),
+        "baseline_no_news": res_no,
+        "news_enhanced": res_with,
+        "comparison_regression": ml_reg,
+        "comparison_classification": ml_clf,
+        "arima_regression_no_news": arima_reg_no,
+        "arima_regression_with_news": arima_reg_with,
+        "arima_classification_no_news": arima_clf_no,
+        "arima_classification_with_news": arima_clf_with,
+        "summary": summary,
+        "winners_regression": win_reg,
+        "winners_classification": win_clf,
     }
 
 
 if __name__ == "__main__":
     from config import CFG
 
-    run_experiment(
-        cfg=CFG,
-        data_path=CFG.get("FILE_PATH", DEFAULT_FILE_PATH),
-        out_dir=CFG.get("OUT_DIR", DEFAULT_OUT_DIR),
-    )
+    if bool(CFG.get("RUN_NEWS_ABLATION", False)):
+        run_ab_comparison(
+            cfg=CFG,
+            data_path=CFG.get("FILE_PATH", DEFAULT_FILE_PATH),
+            out_dir=CFG.get("OUT_DIR", DEFAULT_OUT_DIR),
+        )
+    else:
+        run_experiment(
+            cfg=CFG,
+            data_path=CFG.get("FILE_PATH", DEFAULT_FILE_PATH),
+            out_dir=CFG.get("OUT_DIR", DEFAULT_OUT_DIR),
+        )
