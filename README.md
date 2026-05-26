@@ -152,7 +152,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ---
 
-## Сведения о работе (заполнить при сдаче)
+## Сведения о работе
 
 | Поле | Значение |
 |------|----------|
